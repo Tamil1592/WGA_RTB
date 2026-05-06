@@ -38,10 +38,9 @@ if not st.session_state.logged_in:
     st.stop()
 
 # -----------------------------
-# SAMPLE DATA
+# DATA
 # -----------------------------
 def generate_data():
-    # FIX: 'M' → 'ME'
     months = pd.date_range("2024-01-01", periods=24, freq="ME")
     templates = ["Real Estate", "Transport", "Business"]
 
@@ -53,7 +52,7 @@ def generate_data():
 
             data.append({
                 "Template": t,
-                "Month": m,
+                "Month": pd.to_datetime(m),
                 "Leads": leads,
                 "Conversions": conv,
                 "Conversion_Rate": (conv / leads) * 100,
@@ -66,9 +65,6 @@ def generate_data():
 
 df = generate_data()
 
-# -----------------------------
-# KPI SCORE
-# -----------------------------
 df["Score"] = (
     df["Conversion_Rate"] * 0.4 +
     df["SEO_Score"] * 0.2 +
@@ -77,30 +73,63 @@ df["Score"] = (
 )
 
 # -----------------------------
-# SIDEBAR
+# SIDEBAR FILTERS
 # -----------------------------
-st.sidebar.title("⚙️ Controls")
+st.sidebar.title("⚙️ Filters")
 
 dashboard = st.sidebar.radio(
-    "Select Business",
+    "Business Type",
     ["Real Estate", "Transport", "Business"]
 )
 
-date_range = st.sidebar.date_input(
-    "Date Range",
-    [df["Month"].min(), df["Month"].max()]
+time_filter = st.sidebar.radio(
+    "Time Range",
+    ["All", "Past 7 Days", "Past 30 Days", "Past 90 Days", "Custom Range"]
 )
 
 theme = st.sidebar.color_picker("Theme", "#1f77b4")
 
+today = df["Month"].max()
+
 # -----------------------------
-# FILTER
+# TIME FILTER LOGIC
+# -----------------------------
+if time_filter == "Past 7 Days":
+    start_date = today - pd.Timedelta(days=7)
+    end_date = today
+
+elif time_filter == "Past 30 Days":
+    start_date = today - pd.Timedelta(days=30)
+    end_date = today
+
+elif time_filter == "Past 90 Days":
+    start_date = today - pd.Timedelta(days=90)
+    end_date = today
+
+elif time_filter == "Custom Range":
+    dr = st.sidebar.date_input(
+        "Select Date Range",
+        (df["Month"].min().date(), df["Month"].max().date())
+    )
+    start_date = pd.to_datetime(dr[0])
+    end_date = pd.to_datetime(dr[1])
+
+else:
+    start_date = df["Month"].min()
+    end_date = df["Month"].max()
+
+# -----------------------------
+# FILTER DATA
 # -----------------------------
 filtered_df = df[
     (df["Template"] == dashboard) &
-    (df["Month"] >= pd.to_datetime(date_range[0])) &
-    (df["Month"] <= pd.to_datetime(date_range[1]))
+    (df["Month"] >= start_date) &
+    (df["Month"] <= end_date)
 ]
+
+if filtered_df.empty:
+    st.warning("No data found for selected filters")
+    st.stop()
 
 # -----------------------------
 # DASHBOARD
@@ -126,39 +155,40 @@ st.line_chart(trend)
 # FORECAST
 # -----------------------------
 def forecast(df, col):
-    df = df.sort_values("Month")
+    df = df.sort_values("Month").copy()
     df["t"] = range(len(df))
 
     model = LinearRegression()
     model.fit(df[["t"]], df[col])
 
     future = pd.DataFrame({
-        "t": range(len(df), len(df) + 60)
+        "t": range(len(df), len(df) + 12)
     })
 
     future[col] = model.predict(future[["t"]])
-
-    # FIX: 'M' → 'ME'
-    future["Month"] = pd.date_range(df["Month"].max(), periods=60, freq="ME")
+    future["Month"] = pd.date_range(df["Month"].max(), periods=12, freq="ME")
 
     return future
 
-st.subheader("🔮 5-Year Forecast")
+st.subheader("🔮 Forecast")
 
 past = filtered_df.groupby("Month")["Conversion_Rate"].mean().reset_index()
-future = forecast(past.copy(), "Conversion_Rate")
 
-combined = pd.concat([past, future])
-st.line_chart(combined.set_index("Month"))
+if len(past) >= 2:
+    future = forecast(past, "Conversion_Rate")
+    combined = pd.concat([past, future])
+    st.line_chart(combined.set_index("Month"))
+else:
+    st.info("Not enough data for forecast")
 
 # -----------------------------
-# WEBSITE AUDIT ENGINE
+# WEBSITE AUDIT
 # -----------------------------
 st.subheader("🌐 Website Audit")
 
 url = st.text_input("Enter Website URL")
 
-def audit_website(url):
+def audit(url):
     try:
         r = requests.get(url, timeout=5)
         soup = BeautifulSoup(r.text, "html.parser")
@@ -169,11 +199,11 @@ def audit_website(url):
         links = soup.find_all("a")
         broken = 0
 
-        for link in links[:20]:
-            href = link.get("href")
+        for l in links[:15]:
+            href = l.get("href")
             if href and href.startswith("http"):
                 try:
-                    res = requests.get(href, timeout=3)
+                    res = requests.get(href, timeout=2)
                     if res.status_code >= 400:
                         broken += 1
                 except:
@@ -181,49 +211,50 @@ def audit_website(url):
 
         return {
             "title": title,
-            "meta": "Present" if meta else "Missing",
-            "total_links": len(links),
-            "broken_links": broken
+            "meta": bool(meta),
+            "links": len(links),
+            "broken": broken
         }
 
     except:
         return None
 
 if st.button("Run Audit"):
-    result = audit_website(url)
+    result = audit(url)
 
     if result:
-        st.write(result)
+        st.json(result)
 
-        st.subheader("🧠 Situations & Solutions")
+        if not result["meta"]:
+            st.warning("Missing meta description")
 
-        if result["meta"] == "Missing":
-            st.warning("❌ Situation: No meta description")
-            st.success("✅ Solution: Add SEO meta tags")
+        if result["broken"] > 3:
+            st.error("High broken links detected")
 
-        if result["broken_links"] > 5:
-            st.error("❌ Situation: Many broken links")
-            st.success("✅ Solution: Fix all 404 links")
-
-        if result["total_links"] < 10:
-            st.warning("❌ Situation: Low internal linking")
-            st.success("✅ Solution: Add internal navigation links")
+        if result["links"] < 10:
+            st.info("Low internal linking structure")
     else:
-        st.error("Invalid URL or access denied")
+        st.error("Invalid URL")
 
 # -----------------------------
 # AI INSIGHTS
 # -----------------------------
-st.subheader("🤖 Smart Insights")
+st.subheader("🧠 AI Insights")
 
-if filtered_df["Conversion_Rate"].mean() < 30:
-    st.warning("Low conversion → Improve CTA")
+avg_conv = filtered_df["Conversion_Rate"].mean()
+avg_seo = filtered_df["SEO_Score"].mean()
+avg_perf = filtered_df["Performance"].mean()
 
-if filtered_df["SEO_Score"].mean() < 50:
-    st.info("SEO weak → optimize content")
+score = (avg_conv * 0.5) + (avg_seo * 0.3) + (avg_perf * 0.2)
 
-if filtered_df["Performance"].mean() < 50:
-    st.warning("Performance issue → optimize speed")
+st.metric("AI Score", round(score, 2))
+
+if score > 70:
+    st.success("Strong performance 🚀")
+elif score > 40:
+    st.warning("Moderate performance")
+else:
+    st.error("Critical performance issue")
 
 # -----------------------------
 # THEME
